@@ -163,10 +163,33 @@ def _normalize_appointment_payload(
     }
 
 
+_PLACEHOLDER_PATTERNS = (
+    "your-project-ref",
+    "your_project",
+    "example.supabase.co",
+    "placeholder",
+    "<",
+    ">",
+)
+
+
+def _is_valid_supabase_url(url: str) -> bool:
+    """Return True only if the URL looks like a real Supabase endpoint."""
+    if not url.startswith("https://"):
+        return False
+    for bad in _PLACEHOLDER_PATTERNS:
+        if bad in url:
+            return False
+    return True
+
+
 def get_supabase() -> Client | None:
     url = os.environ.get("SUPABASE_URL", "")
     key = os.environ.get("SUPABASE_KEY", "")
     if not url or not key:
+        return None
+    if not _is_valid_supabase_url(url):
+        logger.debug(f"Supabase URL looks like a placeholder ({url!r}). Skipping client init.")
         return None
 
     global _SUPABASE_CLIENT, _SUPABASE_CLIENT_KEY
@@ -438,6 +461,11 @@ def fetch_appointments(
     except Exception as exc:
         normalized = _normalize_appointment_error(exc)
         logger.error(f"Failed to fetch appointments: {normalized}")
+        # Return empty list for schema/table-missing errors so the UI
+        # shows an empty state instead of a 500. Re-raise only for
+        # unexpected errors that indicate a real runtime fault.
+        if isinstance(normalized, (AppointmentValidationError,)):
+            return []
         raise normalized
 
 

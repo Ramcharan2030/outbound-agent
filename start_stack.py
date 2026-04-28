@@ -33,11 +33,15 @@ def _bootstrap_venv() -> None:
 _bootstrap_venv()
 
 
+DEFAULT_FRONTEND_PORT = 5173
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Start the backend-only SPXAgent local stack.")
     parser.add_argument("--no-api", action="store_true", help="Skip the FastAPI backend API.")
     parser.add_argument("--no-agent", action="store_true", help="Skip the LiveKit voice agent worker.")
     parser.add_argument("--no-kb-worker", action="store_true", help="Skip the knowledge-base ingestion and LeadRat sync worker.")
+    parser.add_argument("--no-frontend", action="store_true", help="Skip the frontend Vite dev server.")
     parser.add_argument("--api-port", type=int, default=None, help="Preferred backend API port. Falls forward to the next free port if busy.")
     parser.add_argument("--agent-port", type=int, default=None, help="Preferred LiveKit worker health port. Falls forward to the next free port if busy.")
     return parser.parse_args()
@@ -119,6 +123,17 @@ def build_services(
                 "name": "kb",
                 "cmd": [python_cmd, "kb_worker.py"],
                 "cwd": str(ROOT),
+            }
+        )
+    frontend_dir = ROOT / "frontend"
+    if not args.no_frontend and frontend_dir.is_dir():
+        # Resolve npm/npx from PATH; on Windows npm is npm.cmd
+        npm_cmd = "npm.cmd" if os.name == "nt" else "npm"
+        services.append(
+            {
+                "name": "frontend",
+                "cmd": [npm_cmd, "run", "dev"],
+                "cwd": str(frontend_dir),
             }
         )
     return services
@@ -209,9 +224,11 @@ def main() -> int:
     procs = start_services(services)
     print("[stack] Local stack is starting. Press Ctrl+C once to stop everything.", flush=True)
     if not args.no_api:
-        print(f"[stack] Backend API: http://127.0.0.1:{api_port}", flush=True)
+        print(f"[stack] Backend API:  http://127.0.0.1:{api_port}", flush=True)
     if not args.no_agent:
         print(f"[stack] Agent health: http://127.0.0.1:{agent_port}", flush=True)
+    if not args.no_frontend and (ROOT / "frontend").is_dir():
+        print(f"[stack] Frontend UI:  http://127.0.0.1:{DEFAULT_FRONTEND_PORT}", flush=True)
     try:
         while True:
             for name, process in procs:
