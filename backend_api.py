@@ -14,7 +14,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from backend_config import (
     apply_config_env,
@@ -50,6 +50,8 @@ if sys.stderr and hasattr(sys.stderr, "reconfigure"):
 logger = logging.getLogger("backend-api")
 
 MAX_KB_UPLOAD_BYTES = 25 * 1024 * 1024
+FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
+FRONTEND_INDEX = FRONTEND_DIST / "index.html"
 
 app = FastAPI(
     title="SPXAgent Backend API",
@@ -710,11 +712,13 @@ async def api_call_bulk(request: Request):
 
 @app.get("/")
 async def root():
+    if FRONTEND_INDEX.exists():
+        return FileResponse(FRONTEND_INDEX)
     return {
         "message": "SPXAgent Backend API is running.",
         "docs": "/docs",
         "health": "/health",
-        "frontend": "http://localhost:5173"
+        "frontend": "frontend/dist is not bundled in this deployment.",
     }
 
 
@@ -725,3 +729,28 @@ def health_check():
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "service": "spx-backend-api",
     }
+
+
+@app.get("/{full_path:path}")
+async def frontend_spa(full_path: str):
+    if full_path.startswith(("api/", "docs", "openapi.json", "health")):
+        return JSONResponse({"status": "error", "message": "Not found."}, status_code=404)
+
+    requested = (FRONTEND_DIST / full_path).resolve()
+    try:
+        requested.relative_to(FRONTEND_DIST.resolve())
+    except ValueError:
+        return JSONResponse({"status": "error", "message": "Not found."}, status_code=404)
+
+    if requested.is_file():
+        return FileResponse(requested)
+    if FRONTEND_INDEX.exists():
+        return FileResponse(FRONTEND_INDEX)
+    return JSONResponse(
+        {
+            "message": "SPXAgent Backend API is running.",
+            "docs": "/docs",
+            "health": "/health",
+            "frontend": "frontend/dist is not bundled in this deployment.",
+        }
+    )
