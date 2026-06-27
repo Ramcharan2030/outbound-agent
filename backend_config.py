@@ -136,6 +136,73 @@ ENV_KEY_MAP = {
     "business_sunday_end": "BUSINESS_SUNDAY_END",
 }
 
+CONFIG_KEY_ALIASES = {
+    "llmProvider": "llm_provider",
+    "openrouterApiKey": "openrouter_api_key",
+    "openrouterModel": "openrouter_model",
+    "firstLine": "first_line",
+    "agentInstructions": "agent_instructions",
+    "geminiLiveModel": "gemini_live_model",
+    "geminiLiveVoice": "gemini_live_voice",
+    "geminiLiveTemperature": "gemini_live_temperature",
+    "geminiLiveLanguage": "gemini_live_language",
+    "geminiLivePreflightEnabled": "gemini_live_preflight_enabled",
+    "geminiLivePreflightTimeout": "gemini_live_preflight_timeout",
+    "geminiLiveConnectTimeout": "gemini_live_connect_timeout",
+    "geminiLiveConnectRetries": "gemini_live_connect_retries",
+    "geminiTtsModel": "gemini_tts_model",
+    "langPreset": "lang_preset",
+    "maxTurns": "max_turns",
+    "userAwayTimeout": "user_away_timeout",
+    "sessionCloseTranscriptTimeout": "session_close_transcript_timeout",
+    "livekitUrl": "livekit_url",
+    "livekitApiKey": "livekit_api_key",
+    "livekitApiSecret": "livekit_api_secret",
+    "sipTrunkId": "sip_trunk_id",
+    "googleApiKey": "google_api_key",
+    "telegramBotToken": "telegram_bot_token",
+    "telegramChatId": "telegram_chat_id",
+    "supabaseUrl": "supabase_url",
+    "supabaseKey": "supabase_key",
+    "kbEnabled": "kb_enabled",
+    "kbBackend": "kb_backend",
+    "kbDataDir": "kb_data_dir",
+    "kbTopK": "kb_top_k",
+    "kbSimilarityThreshold": "kb_similarity_threshold",
+    "kbContextCharBudget": "kb_context_char_budget",
+    "kbLiveTimeoutMs": "kb_live_timeout_ms",
+    "kbLiveContextCharBudget": "kb_live_context_char_budget",
+    "kbCacheTtlSeconds": "kb_cache_ttl_seconds",
+    "kbChunkSize": "kb_chunk_size",
+    "kbChunkOverlap": "kb_chunk_overlap",
+    "kbWorkerPollSeconds": "kb_worker_poll_seconds",
+    "kbEmbeddingProvider": "kb_embedding_provider",
+    "kbEmbeddingModel": "kb_embedding_model",
+    "kbEmbeddingFallbackProvider": "kb_embedding_fallback_provider",
+    "kbEmbeddingFallbackModel": "kb_embedding_fallback_model",
+    "kbIndexKind": "kb_index_kind",
+    "kbRerankEnabled": "kb_rerank_enabled",
+    "businessWeekdayStart": "business_weekday_start",
+    "businessWeekdayEnd": "business_weekday_end",
+    "businessSaturdayStart": "business_saturday_start",
+    "businessSaturdayEnd": "business_saturday_end",
+    "businessSundayEnabled": "business_sunday_enabled",
+    "businessSundayStart": "business_sunday_start",
+    "businessSundayEnd": "business_sunday_end",
+}
+
+
+def normalize_config_payload(data: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    payload = data.get("config") if isinstance(data.get("config"), dict) else data
+    normalized: dict[str, Any] = {}
+    for key, value in payload.items():
+        target_key = CONFIG_KEY_ALIASES.get(key, key)
+        if target_key in ALLOWED_CONFIG_KEYS:
+            normalized[target_key] = value
+    return normalized
+
 
 def parse_bool(value: Any, default: bool) -> bool:
     if value in (None, ""):

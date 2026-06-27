@@ -1519,12 +1519,22 @@ async def entrypoint(ctx: JobContext) -> None:
 def main() -> None:
     worker_host = str(os.environ.get("AGENT_HOST") or os.environ.get("LIVEKIT_WORKER_HOST") or "").strip()
     worker_port = parse_int(os.environ.get("AGENT_PORT") or os.environ.get("LIVEKIT_WORKER_PORT"), 8081)
+    worker_idle_processes = max(
+        1,
+        min(20, parse_int(os.environ.get("LIVEKIT_WORKER_IDLE_PROCESSES") or os.environ.get("AGENT_WORKER_PROCESSES"), 4)),
+    )
+    worker_load_threshold = max(
+        0.1,
+        min(1.0, parse_float(os.environ.get("LIVEKIT_WORKER_LOAD_THRESHOLD") or os.environ.get("AGENT_LOAD_THRESHOLD"), 0.95)),
+    )
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
             agent_name=DEFAULT_AGENT_NAME,
             host=worker_host,
             port=worker_port,
+            num_idle_processes=worker_idle_processes,
+            load_threshold=worker_load_threshold,
         )
     )
 

@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from backend_config import (
     apply_config_env,
+    normalize_config_payload,
     parse_int,
     read_config,
     write_config,
@@ -194,9 +195,13 @@ async def api_get_config():
 @app.post("/api/config")
 async def api_post_config(request: Request):
     data = await request.json()
-    updated = write_config(data)
+    updated = write_config(normalize_config_payload(data))
     apply_config_env(updated)
-    logger.info("Configuration updated via backend API.")
+    logger.info(
+        "Configuration updated via backend API first_line_chars=%s agent_instructions_chars=%s",
+        len(str(updated.get("first_line") or "")),
+        len(str(updated.get("agent_instructions") or "")),
+    )
     return {"status": "ok", "config": updated}
 
 
