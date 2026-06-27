@@ -52,6 +52,7 @@ logger = logging.getLogger("backend-api")
 MAX_KB_UPLOAD_BYTES = 25 * 1024 * 1024
 FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
 FRONTEND_INDEX = FRONTEND_DIST / "index.html"
+FRONTEND_NO_CACHE_HEADERS = {"Cache-Control": "no-store, max-age=0"}
 
 app = FastAPI(
     title="SPXAgent Backend API",
@@ -78,6 +79,10 @@ def _load_runtime_config(phone_number: str | None = None) -> dict:
     config = read_config(phone_number)
     apply_config_env(config)
     return config
+
+
+def frontend_file_response(path: Path) -> FileResponse:
+    return FileResponse(path, headers=FRONTEND_NO_CACHE_HEADERS)
 
 
 def parse_calendar_datetime(value: str) -> datetime:
@@ -713,7 +718,7 @@ async def api_call_bulk(request: Request):
 @app.get("/")
 async def root():
     if FRONTEND_INDEX.exists():
-        return FileResponse(FRONTEND_INDEX)
+        return frontend_file_response(FRONTEND_INDEX)
     return {
         "message": "SPXAgent Backend API is running.",
         "docs": "/docs",
@@ -743,9 +748,9 @@ async def frontend_spa(full_path: str):
         return JSONResponse({"status": "error", "message": "Not found."}, status_code=404)
 
     if requested.is_file():
-        return FileResponse(requested)
+        return frontend_file_response(requested)
     if FRONTEND_INDEX.exists():
-        return FileResponse(FRONTEND_INDEX)
+        return frontend_file_response(FRONTEND_INDEX)
     return JSONResponse(
         {
             "message": "SPXAgent Backend API is running.",
