@@ -25,6 +25,9 @@ DEFAULT_FIRST_LINE = (
 )
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    "llm_provider": "gemini",
+    "openrouter_api_key": "",
+    "openrouter_model": "google/gemini-2.0-flash-001",
     "first_line": DEFAULT_FIRST_LINE,
     "agent_instructions": "",
     "gemini_live_model": DEFAULT_GEMINI_LIVE_MODEL,
@@ -67,11 +70,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "kb_embedding_fallback_model": "gemini-embedding-001",
     "kb_index_kind": "flat_ip",
     "kb_rerank_enabled": False,
+    "business_weekday_start": 10,
+    "business_weekday_end": 19,
+    "business_saturday_start": 10,
+    "business_saturday_end": 17,
+    "business_sunday_enabled": False,
+    "business_sunday_start": 10,
+    "business_sunday_end": 14,
 }
 
 ALLOWED_CONFIG_KEYS = tuple(DEFAULT_CONFIG.keys())
 
 ENV_KEY_MAP = {
+    "llm_provider": "LLM_PROVIDER",
+    "openrouter_api_key": "OPENROUTER_API_KEY",
+    "openrouter_model": "OPENROUTER_MODEL",
     "first_line": "FIRST_LINE",
     "agent_instructions": "AGENT_INSTRUCTIONS",
     "gemini_live_model": "GEMINI_LIVE_MODEL",
@@ -114,6 +127,13 @@ ENV_KEY_MAP = {
     "kb_embedding_fallback_model": "KB_EMBEDDING_FALLBACK_MODEL",
     "kb_index_kind": "KB_INDEX_KIND",
     "kb_rerank_enabled": "KB_RERANK_ENABLED",
+    "business_weekday_start": "BUSINESS_WEEKDAY_START",
+    "business_weekday_end": "BUSINESS_WEEKDAY_END",
+    "business_saturday_start": "BUSINESS_SATURDAY_START",
+    "business_saturday_end": "BUSINESS_SATURDAY_END",
+    "business_sunday_enabled": "BUSINESS_SUNDAY_ENABLED",
+    "business_sunday_start": "BUSINESS_SUNDAY_START",
+    "business_sunday_end": "BUSINESS_SUNDAY_END",
 }
 
 
@@ -201,6 +221,9 @@ def _normalize_config(values: dict[str, Any] | None) -> dict[str, Any]:
                     raw[key] = env_value
 
     normalized = {
+        "llm_provider": str(raw.get("llm_provider") or "gemini").strip().lower() or "gemini",
+        "openrouter_api_key": str(raw.get("openrouter_api_key") or "").strip(),
+        "openrouter_model": str(raw.get("openrouter_model") or "google/gemini-2.0-flash-001").strip() or "google/gemini-2.0-flash-001",
         "first_line": str(raw.get("first_line") or DEFAULT_CONFIG["first_line"]).strip() or DEFAULT_CONFIG["first_line"],
         "agent_instructions": str(raw.get("agent_instructions") or "").strip(),
         "gemini_live_model": str(raw.get("gemini_live_model") or DEFAULT_GEMINI_LIVE_MODEL).strip() or DEFAULT_GEMINI_LIVE_MODEL,
@@ -243,6 +266,13 @@ def _normalize_config(values: dict[str, Any] | None) -> dict[str, Any]:
         "kb_embedding_fallback_model": str(raw.get("kb_embedding_fallback_model") or "gemini-embedding-001").strip() or "gemini-embedding-001",
         "kb_index_kind": str(raw.get("kb_index_kind") or "flat_ip").strip().lower() or "flat_ip",
         "kb_rerank_enabled": parse_bool(raw.get("kb_rerank_enabled"), False),
+        "business_weekday_start": parse_int(raw.get("business_weekday_start"), 10),
+        "business_weekday_end": parse_int(raw.get("business_weekday_end"), 19),
+        "business_saturday_start": parse_int(raw.get("business_saturday_start"), 10),
+        "business_saturday_end": parse_int(raw.get("business_saturday_end"), 17),
+        "business_sunday_enabled": parse_bool(raw.get("business_sunday_enabled"), False),
+        "business_sunday_start": parse_int(raw.get("business_sunday_start"), 10),
+        "business_sunday_end": parse_int(raw.get("business_sunday_end"), 14),
     }
     return normalized
 

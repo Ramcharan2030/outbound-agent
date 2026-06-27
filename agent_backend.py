@@ -1,19 +1,38 @@
 from __future__ import annotations
+import os
+import sys
+from pathlib import Path
+
+def _maybe_relaunch_in_venv() -> None:
+    project_dir = Path(__file__).resolve().parent
+    venv_python = project_dir / ".venv" / "Scripts" / "python.exe"
+    if not venv_python.exists():
+        return
+    try:
+        current_python = Path(sys.executable).resolve()
+        target_python = venv_python.resolve()
+    except Exception:
+        return
+    if current_python == target_python:
+        return
+    import logging
+    logging.getLogger().info("[BOOT] Relaunching agent with project virtualenv")
+    os.execv(str(target_python), [str(target_python), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+_maybe_relaunch_in_venv()
 
 import asyncio
 import base64
 import json
 import logging
-import os
 import re
-import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Annotated, AsyncIterator
 
-import certifi
+
+import certifi 
 from dotenv import load_dotenv
 
 os.environ["SSL_CERT_FILE"] = certifi.where()
@@ -40,7 +59,11 @@ logging.getLogger("livekit.plugins.google").addFilter(_SuppressKnownWarnings())
 
 load_dotenv()
 logger = logging.getLogger("backend-agent")
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(asctime)s.%(msecs)03d %(levelname)s %(name)s [pid=%(process)d] %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
 
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     try:
@@ -54,20 +77,7 @@ if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         pass
 
 
-def _maybe_relaunch_in_venv() -> None:
-    project_dir = Path(__file__).resolve().parent
-    venv_python = project_dir / ".venv" / "Scripts" / "python.exe"
-    if not venv_python.exists():
-        return
-    try:
-        current_python = Path(sys.executable).resolve()
-        target_python = venv_python.resolve()
-    except Exception:
-        return
-    if current_python == target_python:
-        return
-    logger.info("[BOOT] Relaunching agent with project virtualenv")
-    os.execv(str(target_python), [str(target_python), str(Path(__file__).resolve()), *sys.argv[1:]])
+
 
 
 from livekit import api, rtc
@@ -76,8 +86,10 @@ from livekit.agents.types import APIConnectOptions
 
 try:
     from livekit.plugins import google as google_plugin
+    from livekit.plugins import openai as openai_plugin
 except ImportError:
     google_plugin = None
+    openai_plugin = None
 
 try:
     from google import genai as google_genai
@@ -110,11 +122,20 @@ from calendar_tools import async_create_booking, get_available_slots
 DEFAULT_GEMINI_TTS_SAMPLE_RATE = 24000
 DEFAULT_AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "vobiz-demo-agent").strip() or "vobiz-demo-agent"
 
+def get_ist_time_context() -> str:
+    now = datetime.now(_IST)
+    return (
+        f"\n\n[TIME CONTEXT]\n"
+        f"Current IST Time: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Today is: {now.strftime('%A')}"
+    )
+
+
 _IST = timezone(timedelta(hours=5, minutes=30))
 _call_timestamps: dict[str, list[float]] = defaultdict(list)
 _caller_history_cache: dict[str, tuple[float, dict[str, str]]] = {}
 CALLER_HISTORY_CACHE_TTL = 300.0
-RATE_LIMIT_CALLS = 5
+RATE_LIMIT_CALLS = 100
 RATE_LIMIT_WINDOW = 3600
 
 LANGUAGE_PRESETS = {
@@ -185,6 +206,7 @@ FILLER_WORDS = {
 
 _gemini_tts_cache: dict[tuple[str, str, str], bytes] = {}
 _GEMINI_TTS_CACHE_MAX = 8
+_google_genai_client: google_genai.Client | None = None
 
 
 def is_rate_limited(phone: str) -> bool:
@@ -301,8 +323,12 @@ def synthesize_gemini_tts_pcm(text: str, live_config: dict | None, *, purpose: s
         f"add, remove, or replace words: {json.dumps(str(text), ensure_ascii=False)}"
     )
     logger.info("[VOICE] Generating Gemini TTS for %s", purpose)
-    client = google_genai.Client(api_key=api_key)
-    response = client.models.generate_content(
+    
+    global _google_genai_client
+    if _google_genai_client is None:
+        _google_genai_client = google_genai.Client(api_key=api_key)
+    
+    response = _google_genai_client.models.generate_content(
         model=model_name,
         contents=prompt,
         config=google_genai_types.GenerateContentConfig(
@@ -367,9 +393,10 @@ async def say_with_gemini_tts(
         else:
             pcm = await asyncio.to_thread(synthesize_gemini_tts_pcm, text, live_config, purpose=purpose)
         session.say(text, audio=pcm_to_audio_frames(pcm), add_to_chat_ctx=True)
+        logger.info("[VOICE] Successfully queued Gemini TTS for %s", purpose)
         return True
     except Exception as exc:
-        logger.warning("[VOICE] Gemini TTS failed for %s: %s", purpose, exc)
+        logger.error("[VOICE] Gemini TTS failed for %s: %s", purpose, exc)
         return False
 
 
@@ -405,9 +432,9 @@ def build_gemini_realtime_model(live_config: dict):
         automatic_activity_detection=google_genai_types.AutomaticActivityDetection(
             disabled=False,
             start_of_speech_sensitivity=google_genai_types.StartSensitivity.START_SENSITIVITY_HIGH,
-            end_of_speech_sensitivity=google_genai_types.EndSensitivity.END_SENSITIVITY_LOW,
-            prefix_padding_ms=200,
-            silence_duration_ms=700,
+            end_of_speech_sensitivity=google_genai_types.EndSensitivity.END_SENSITIVITY_HIGH,
+            prefix_padding_ms=150,
+            silence_duration_ms=450,
         )
     )
 
@@ -438,6 +465,48 @@ def build_gemini_realtime_model(live_config: dict):
     if language:
         kwargs["language"] = language
     return google_plugin.realtime.RealtimeModel(**kwargs)
+
+
+def build_openrouter_pipeline_agent(
+    live_config: dict,
+    agent_tools: AgentTools,
+    first_line: str = "",
+) -> Agent:
+    if openai_plugin is None or google_plugin is None:
+        raise RuntimeError("OpenRouter requires livekit-plugins-openai and livekit-plugins-google.")
+
+    api_key = str(live_config.get("openrouter_api_key") or os.environ.get("OPENROUTER_API_KEY", "")).strip()
+    if not api_key:
+        raise RuntimeError("Missing OPENROUTER_API_KEY.")
+
+    model = str(live_config.get("openrouter_model") or "google/gemini-2.0-flash-001").strip()
+    
+    llm = openai_plugin.LLM(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
+        model=model,
+    )
+    
+    stt = google_plugin.STT()
+    tts = google_plugin.TTS()
+    
+    prompt = (
+        str(live_config.get("agent_instructions") or "").strip()
+        + "\n\n[CALL POLICY]\n"
+        + "This backend-only branch supports inbound and outbound phone calls only.\n"
+        + "Default next steps are an appointment, a callback, or a human transfer."
+        + get_ist_time_context()
+    )
+
+    assistant = Agent(
+        stt=stt,
+        llm=llm,
+        tts=tts,
+        fnc_ctx=agent_tools,
+        instructions=prompt,
+    )
+    
+    return assistant
 
 
 async def preflight_gemini_live_connection(live_config: dict) -> bool:
@@ -625,10 +694,19 @@ class AgentTools(llm.ToolContext):
     async def check_availability(self, date: Annotated[str, "Date in YYYY-MM-DD format"]) -> str:
         started_at = time.monotonic()
         try:
-            slots = await get_available_slots(date)
+            slots = await get_available_slots(date, config=self.live_config)
             if not slots:
                 return f"No available slots on {date}. Would you like to check another date?"
-            labels = [slot.get("label") or slot.get("start_time", "")[-8:][:5] for slot in slots[:6]]
+            labels = []
+            for slot in slots[:6]:
+                label = slot.get("label")
+                if not label:
+                    # Robust fallback for ISO strings like "2026-02-24T10:00:00+05:30"
+                    st = slot.get("start_time", "")
+                    if "T" in st:
+                        label = st.split("T")[1][:5]
+                if label:
+                    labels.append(label)
             return f"Available slots on {date}: {', '.join(labels)} IST."
         except Exception as exc:
             logger.error("[TOOL] check_availability failed: %s", exc)
@@ -641,22 +719,35 @@ class AgentTools(llm.ToolContext):
         started_at = time.monotonic()
         try:
             now = datetime.now(_IST)
+            config = self.live_config or {}
+            def fmt_h(h):
+                return f"{h % 12 or 12}:00 {'AM' if h < 12 else 'PM'}"
+
             hours = {
-                0: ("Monday", "10:00", "19:00"),
-                1: ("Tuesday", "10:00", "19:00"),
-                2: ("Wednesday", "10:00", "19:00"),
-                3: ("Thursday", "10:00", "19:00"),
-                4: ("Friday", "10:00", "19:00"),
-                5: ("Saturday", "10:00", "17:00"),
-                6: ("Sunday", None, None),
+                0: ("Monday", config.get("business_weekday_start", 10), config.get("business_weekday_end", 19)),
+                1: ("Tuesday", config.get("business_weekday_start", 10), config.get("business_weekday_end", 19)),
+                2: ("Wednesday", config.get("business_weekday_start", 10), config.get("business_weekday_end", 19)),
+                3: ("Thursday", config.get("business_weekday_start", 10), config.get("business_weekday_end", 19)),
+                4: ("Friday", config.get("business_weekday_start", 10), config.get("business_weekday_end", 19)),
+                5: ("Saturday", config.get("business_saturday_start", 10), config.get("business_saturday_end", 17)),
+                6: ("Sunday", config.get("business_sunday_start", 10) if config.get("business_sunday_enabled") else None, config.get("business_sunday_end", 14)),
             }
-            day_name, open_time, close_time = hours[now.weekday()]
-            current_time = now.strftime("%H:%M")
-            if open_time is None:
-                return "We are closed on Sundays. Next opening is Monday at 10:00 AM IST."
-            if open_time <= current_time <= close_time:
-                return f"We are open. Today ({day_name}) our hours are {open_time} to {close_time} IST."
-            return f"We are currently closed. Today ({day_name}) our hours are {open_time} to {close_time} IST."
+            day_name, open_h, close_h = hours[now.weekday()]
+            current_h = now.hour
+            
+            if open_h is None:
+                next_day = "Monday"
+                next_start = config.get("business_weekday_start", 10)
+                return f"We are closed on Sundays. Next opening is {next_day} at {fmt_h(next_start)} IST."
+            
+            range_str = f"{fmt_h(open_h)} to {fmt_h(close_h)}"
+            if open_h <= current_h < close_h:
+                return f"We are open. Today ({day_name}) our hours are {range_str} IST."
+            
+            # If closed but it's today, mention when it opens if it's earlier, or just when it opens next
+            if current_h < open_h:
+                return f"We are currently closed. Today ({day_name}) we open at {fmt_h(open_h)} IST (total hours: {range_str})."
+            return f"We are currently closed for the day. Today ({day_name}) our hours were {range_str} IST."
         finally:
             self._record_tool_time(started_at)
 
@@ -687,12 +778,14 @@ class OutboundAssistant(Agent):
         live_config: dict | None = None,
         caller_profile: dict | None = None,
         runtime_state: dict | None = None,
+        auto_greet: bool = True,
     ) -> None:
         tools = llm.find_function_tools(agent_tools)
         self._first_line = first_line
         self._live_config = live_config or {}
         self._caller_profile = caller_profile or {}
         self._runtime_state = runtime_state or {}
+        self._auto_greet = auto_greet
 
         base_instructions = str(self._live_config.get("agent_instructions") or "").strip()
         if not base_instructions:
@@ -739,13 +832,26 @@ class OutboundAssistant(Agent):
         super().__init__(instructions=prompt, tools=tools)
 
     async def on_enter(self) -> None:
-        greeting = get_opening_greeting(self._live_config, self._first_line)
-        if not gemini_live_supports_scripted_generation(self._live_config):
-            await say_with_gemini_tts(self.session, greeting, self._live_config, purpose="opening line")
+        if not self._auto_greet:
             return
-        await self.session.generate_reply(
-            instructions=f"Say exactly this opening line in a warm Indian phone-call style: {json.dumps(greeting)}"
-        )
+        await self.speak_opening()
+
+    async def speak_opening(self) -> None:
+        greeting = get_opening_greeting(self._live_config, self._first_line)
+        logger.info("[AGENT] on_enter: Generating opening greeting: %s", greeting)
+        if not gemini_live_supports_scripted_generation(self._live_config):
+            success = await say_with_gemini_tts(self.session, greeting, self._live_config, purpose="opening line")
+            if not success:
+                logger.error("[AGENT] Failed to generate opening greeting via Gemini TTS")
+            return
+        
+        try:
+            await self.session.generate_reply(
+                instructions=f"Say exactly this opening line in a warm Indian phone-call style: {json.dumps(greeting)}"
+            )
+            logger.info("[AGENT] on_enter: Reply generation requested")
+        except Exception as exc:
+            logger.error("[AGENT] on_enter: Failed to request reply generation: %s", exc)
 
     async def on_user_turn_completed(self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage) -> None:
         del turn_ctx
@@ -757,27 +863,38 @@ class OutboundAssistant(Agent):
             active_turn["kb_skipped_reason"] = "tool_driven"
 
 
+def parse_outbound_job_metadata(raw_metadata: str | None) -> dict:
+    if not raw_metadata:
+        return {}
+    try:
+        parsed = json.loads(raw_metadata)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    if str(parsed.get("call_direction") or "").strip().lower() != "outbound":
+        return {}
+    if not parsed.get("phone_number"):
+        return {}
+    return parsed
+
+
 async def entrypoint(ctx: JobContext) -> None:
+    job_meta = parse_outbound_job_metadata(ctx.job.metadata)
+    if not job_meta:
+        logger.warning(
+            "[OUTBOUND] Ignoring non-outbound job id=%s room=%s",
+            getattr(ctx.job, "id", ""),
+            getattr(ctx.job, "room", ""),
+        )
+        return
+
     await ctx.connect()
     logger.info("[ROOM] Connected: %s", ctx.room.name)
 
-    phone_number = None
-    caller_name = ""
+    phone_number = job_meta.get("phone_number")
+    caller_name = str(job_meta.get("caller_name") or "").strip()
     caller_phone = "unknown"
-    job_meta: dict = {}
-
-    metadata = ctx.job.metadata or ""
-    if metadata:
-        try:
-            parsed = json.loads(metadata)
-            if isinstance(parsed, dict):
-                job_meta = parsed
-                phone_number = parsed.get("phone_number")
-                caller_name = str(parsed.get("caller_name") or "").strip()
-            elif isinstance(parsed, str):
-                phone_number = parsed
-        except Exception:
-            pass
 
     for identity, participant in ctx.room.remote_participants.items():
         if participant.name and participant.name not in ("", "Caller", "Unknown"):
@@ -790,11 +907,10 @@ async def entrypoint(ctx: JobContext) -> None:
             if match:
                 phone_number = match.group()
 
-    is_outbound_call = bool(phone_number and job_meta)
     caller_phone = db.normalize_phone_number(phone_number or "") or "unknown"
 
     if is_rate_limited(caller_phone):
-        logger.warning("[RATE-LIMIT] Blocked %s", caller_phone)
+        logger.error("[RATE-LIMIT] Blocked %s (Too many calls in the last hour)", caller_phone)
         return
 
     live_config = get_live_config(caller_phone if caller_phone != "unknown" else None)
@@ -863,42 +979,10 @@ async def entrypoint(ctx: JobContext) -> None:
 
     sip_participant_identity = get_sip_participant_identity(phone_number)
     outbound_trunk_id = get_outbound_sip_trunk_id(live_config, job_meta)
-    if is_outbound_call:
-        if not outbound_trunk_id:
-            logger.error("[OUTBOUND] Missing SIP trunk ID")
-            ctx.shutdown()
-            return
-        try:
-            await ctx.api.sip.create_sip_participant(
-                api.CreateSIPParticipantRequest(
-                    room_name=ctx.room.name,
-                    sip_trunk_id=outbound_trunk_id,
-                    sip_call_to=phone_number,
-                    participant_identity=sip_participant_identity,
-                    participant_name=caller_name or str(phone_number or ""),
-                    wait_until_answered=True,
-                )
-            )
-            logger.info("[OUTBOUND] Call answered for %s", phone_number)
-            try:
-                participant = await ctx.wait_for_participant(identity=sip_participant_identity)
-                if participant.name and participant.name not in ("", "Caller", "Unknown"):
-                    caller_name = participant.name
-                attrs = participant.attributes or {}
-                caller_phone = (
-                    db.normalize_phone_number(attrs.get("sip.phoneNumber") or attrs.get("phoneNumber") or "")
-                    or caller_phone
-                )
-            except Exception as exc:
-                logger.debug("[OUTBOUND] wait_for_participant skipped: %s", exc)
-        except api.TwirpError as exc:
-            logger.error("[OUTBOUND] SIP call failed: %s", exc)
-            ctx.shutdown()
-            return
-        except Exception as exc:
-            logger.error("[OUTBOUND] Could not create SIP participant: %s", exc)
-            ctx.shutdown()
-            return
+    if not outbound_trunk_id:
+        logger.error("[OUTBOUND] Missing SIP trunk ID")
+        ctx.shutdown()
+        return
 
     caller_phone = db.normalize_phone_number(caller_phone or "") or "unknown"
     caller_profile = {
@@ -925,16 +1009,107 @@ async def entrypoint(ctx: JobContext) -> None:
     agent_tools.room_name = ctx.room.name
     agent_tools._sip_identity = sip_participant_identity
 
-    agent = OutboundAssistant(
-        agent_tools=agent_tools,
-        first_line=str(live_config.get("first_line") or ""),
-        live_config=live_config,
-        caller_profile=caller_profile,
-        runtime_state=runtime_state,
-    )
+    if str(live_config.get("llm_provider")).lower() == "openrouter":
+        agent = build_openrouter_pipeline_agent(
+            live_config=live_config,
+            agent_tools=agent_tools,
+            first_line=str(live_config.get("first_line") or ""),
+        )
+    else:
+        agent = OutboundAssistant(
+            agent_tools=agent_tools,
+            first_line=str(live_config.get("first_line") or ""),
+            live_config=live_config,
+            caller_profile=caller_profile,
+            runtime_state=runtime_state,
+            auto_greet=False,
+        )
 
     await session.start(room=ctx.room, agent=agent, room_input_options=room_input)
-    logger.info("[AGENT] Session live")
+    logger.info("[AGENT] Session live before outbound dial")
+
+    async def create_outbound_participant(trunk_id: str) -> None:
+        await ctx.api.sip.create_sip_participant(
+            api.CreateSIPParticipantRequest(
+                room_name=ctx.room.name,
+                sip_trunk_id=trunk_id,
+                sip_call_to=phone_number,
+                participant_identity=sip_participant_identity,
+                participant_name=caller_name or str(phone_number or ""),
+                wait_until_answered=True,
+            )
+        )
+
+    try:
+        await create_outbound_participant(outbound_trunk_id)
+        logger.info("[OUTBOUND] Call answered for %s", phone_number)
+        try:
+            participant = await ctx.wait_for_participant(identity=sip_participant_identity)
+            if participant.name and participant.name not in ("", "Caller", "Unknown"):
+                caller_name = participant.name
+                agent_tools.caller_name = caller_name
+                caller_profile["display_name"] = caller_name
+            attrs = participant.attributes or {}
+            caller_phone = (
+                db.normalize_phone_number(attrs.get("sip.phoneNumber") or attrs.get("phoneNumber") or "")
+                or caller_phone
+            )
+            if caller_phone != "unknown":
+                agent_tools.caller_phone = caller_phone
+                caller_profile["phone_number"] = caller_phone
+                caller_profile["trusted_phone"] = True
+                caller_profile["confirmed_phone"] = True
+        except Exception as exc:
+            logger.debug("[OUTBOUND] wait_for_participant skipped: %s", exc)
+    except api.TwirpError as exc:
+        is_not_found = str(getattr(exc, "code", "")).lower().endswith("not_found") or "status=404" in str(exc)
+        if is_not_found:
+            try:
+                trunks = await ctx.api.sip.list_outbound_trunk(api.ListSIPOutboundTrunkRequest())
+                trunk_ids = [item.sip_trunk_id for item in trunks.items if item.sip_trunk_id]
+                if len(trunk_ids) == 1 and trunk_ids[0] != outbound_trunk_id:
+                    replacement_trunk_id = trunk_ids[0]
+                    logger.warning(
+                        "[OUTBOUND] SIP trunk %s was not found; retrying with the project's only outbound trunk %s",
+                        outbound_trunk_id,
+                        replacement_trunk_id,
+                    )
+                    await create_outbound_participant(replacement_trunk_id)
+                    outbound_trunk_id = replacement_trunk_id
+                    logger.info("[OUTBOUND] Call answered for %s after trunk refresh", phone_number)
+                else:
+                    raise
+            except Exception as recovery_exc:
+                logger.error(
+                    "[OUTBOUND] SIP call failed for room=%s trunk=%s: %s",
+                    ctx.room.name,
+                    outbound_trunk_id,
+                    recovery_exc,
+                )
+                ctx.shutdown()
+                return
+        else:
+            logger.error(
+                "[OUTBOUND] SIP call failed for room=%s trunk=%s: %s",
+                ctx.room.name,
+                outbound_trunk_id,
+                exc,
+            )
+            ctx.shutdown()
+            return
+    except Exception as exc:
+        logger.error("[OUTBOUND] Could not create SIP participant: %s", exc)
+        ctx.shutdown()
+        return
+
+    opening_greeting = get_opening_greeting(live_config, str(live_config.get("first_line") or ""))
+    if isinstance(agent, OutboundAssistant):
+        await agent.speak_opening()
+    else:
+        await session.generate_reply(
+            instructions=f"Say exactly this opening line in a warm Indian phone-call style: {json.dumps(opening_greeting)}"
+        )
+    logger.info("[AGENT] Opening greeting queued after outbound answer")
     call_start_time = datetime.now(timezone.utc)
 
     wrapup_instructions = (
@@ -1277,7 +1452,6 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 def main() -> None:
-    _maybe_relaunch_in_venv()
     worker_host = str(os.environ.get("AGENT_HOST") or os.environ.get("LIVEKIT_WORKER_HOST") or "").strip()
     worker_port = parse_int(os.environ.get("AGENT_PORT") or os.environ.get("LIVEKIT_WORKER_PORT"), 8081)
     cli.run_app(

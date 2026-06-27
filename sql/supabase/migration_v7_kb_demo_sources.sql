@@ -17,3 +17,4 @@ DROP TABLE IF EXISTS kb_structured_entities CASCADE;
 
 ALTER TABLE appointments
 ALTER COLUMN title SET DEFAULT 'Appointment';
+

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from backend_config import (
@@ -30,7 +31,11 @@ from outbound_calls import dispatch_outbound_call
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(asctime)s.%(msecs)03d %(levelname)s %(name)s [pid=%(process)d] %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -50,6 +55,14 @@ app = FastAPI(
     title="SPXAgent Backend API",
     version="1.0.0",
     description="Headless backend API for the backend-only Gemini 3.1 Live branch.",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -191,6 +204,21 @@ async def api_get_logs():
     except Exception as exc:
         logger.error(f"Error fetching logs: {exc}")
         return []
+
+
+@app.get("/api/logs/{log_id}")
+async def api_get_log(log_id: str):
+    _load_runtime_config()
+    import db
+
+    try:
+        row = db.get_call_log(log_id)
+        if not row:
+            return JSONResponse({"status": "error", "message": "Log not found."}, status_code=404)
+        return _attach_latency_summary(db, row)
+    except Exception as exc:
+        logger.error(f"Error fetching log {log_id}: {exc}")
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
 @app.get("/api/logs/{log_id}/transcript")
@@ -628,6 +656,8 @@ async def api_call_single(request: Request):
     data = await request.json()
     phone = str(data.get("phone") or data.get("phone_number") or "").strip()
     config = _load_runtime_config()
+    if not phone:
+        return JSONResponse({"status": "error", "message": "Phone number is required."}, status_code=400)
     try:
         result = await dispatch_outbound_call(
             phone,
@@ -636,9 +666,15 @@ async def api_call_single(request: Request):
         )
         logger.info(f"Outbound call dispatched to {phone}: {result['dispatch_id']}")
         return result
+    except ValueError as exc:
+        logger.warning(f"Call dispatch validation error: {exc}")
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
     except Exception as exc:
-        logger.error(f"Call dispatch error: {exc}")
-        return {"status": "error", "message": "Unable to dispatch the outbound call right now."}
+        logger.exception(f"Call dispatch error: {exc}")
+        return JSONResponse(
+            {"status": "error", "message": "Unable to dispatch the outbound call right now."},
+            status_code=502,
+        )
 
 
 @app.post("/api/call/bulk")
@@ -663,10 +699,23 @@ async def api_call_bulk(request: Request):
                 }
             )
             logger.info(f"Bulk outbound dispatched to {phone}: {result['dispatch_id']}")
+        except ValueError as exc:
+            logger.warning(f"Bulk call dispatch validation error for {phone}: {exc}")
+            results.append({"phone": phone, "status": "error", "message": str(exc)})
         except Exception as exc:
-            logger.error(f"Bulk call dispatch error for {phone}: {exc}")
+            logger.exception(f"Bulk call dispatch error for {phone}: {exc}")
             results.append({"phone": phone, "status": "error", "message": "Unable to dispatch this call right now."})
     return {"results": results, "total": len(results)}
+
+
+@app.get("/")
+async def root():
+    return {
+        "message": "SPXAgent Backend API is running.",
+        "docs": "/docs",
+        "health": "/health",
+        "frontend": "http://localhost:5173"
+    }
 
 
 @app.get("/health")

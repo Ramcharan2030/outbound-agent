@@ -1,10 +1,18 @@
 import argparse
 import asyncio
+import logging
+import os
 
 from outbound_calls import dispatch_outbound_call
 
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(asctime)s.%(msecs)03d %(levelname)s %(name)s [pid=%(process)d] %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
 
-async def main():
+
+async def main() -> int:
     parser = argparse.ArgumentParser(description="Make an outbound call via LiveKit Agent.")
     parser.add_argument("--to", required=True, help="The phone number to call (e.g., +91...)")
     parser.add_argument("--name", default="", help="Optional caller/contact name metadata")
@@ -24,9 +32,11 @@ async def main():
         print("-" * 40)
         print("The agent is now joining the room and will dial the number.")
         print("Check your agent terminal for logs.")
+        return 0
     except Exception as exc:
-        print(f"\nError dispatching call: {exc}")
+        print(f"\nError dispatching call: {type(exc).__name__}: {exc}")
+        return 1
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))

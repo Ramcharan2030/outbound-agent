@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import random
 
@@ -6,9 +7,9 @@ from dotenv import load_dotenv
 from livekit import api
 from backend_config import get_outbound_sip_trunk_id, read_config as read_backend_config
 
-DEFAULT_AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "vobiz-demo-agent").strip() or "vobiz-demo-agent"
-
 load_dotenv(".env")
+DEFAULT_AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "vobiz-demo-agent").strip() or "vobiz-demo-agent"
+logger = logging.getLogger("outbound-calls")
 
 
 def read_config() -> dict:
@@ -47,6 +48,30 @@ def validate_livekit_settings(settings: dict[str, str]) -> None:
         raise ValueError("SIP trunk ID is missing. Add it in API Credentials before placing outbound calls.")
 
 
+async def resolve_outbound_trunk_id(
+    sip,
+    configured_trunk_id: str,
+) -> str:
+    response = await sip.list_outbound_trunk(api.ListSIPOutboundTrunkRequest())
+    trunk_ids = [item.sip_trunk_id for item in response.items if item.sip_trunk_id]
+    if configured_trunk_id in trunk_ids:
+        return configured_trunk_id
+    if len(trunk_ids) == 1:
+        resolved = trunk_ids[0]
+        logger.warning(
+            "[OUTBOUND] Configured SIP trunk %s was not found; using the project's only outbound trunk %s",
+            configured_trunk_id,
+            resolved,
+        )
+        return resolved
+    if not trunk_ids:
+        raise ValueError("No outbound SIP trunk exists in the configured LiveKit project.")
+    raise ValueError(
+        f"SIP trunk {configured_trunk_id!r} was not found in the configured LiveKit project. "
+        "Select a valid outbound trunk in API Credentials."
+    )
+
+
 async def dispatch_outbound_call(
     phone_number: str,
     *,
@@ -61,7 +86,15 @@ async def dispatch_outbound_call(
     validate_livekit_settings(settings)
 
     room_name = f"call-{phone.replace('+', '')}-{random.randint(1000, 9999)}"
+    logger.info(
+        "[OUTBOUND] Creating dispatch phone=%s room=%s agent=%s trunk=%s",
+        phone,
+        room_name,
+        agent_name,
+        settings["sip_trunk_id"],
+    )
     metadata = {
+        "call_direction": "outbound",
         "phone_number": phone,
         "sip_trunk_id": settings["sip_trunk_id"],
     }
@@ -69,6 +102,9 @@ async def dispatch_outbound_call(
         metadata["caller_name"] = caller_name
     if extra_metadata:
         metadata.update(extra_metadata)
+        metadata["call_direction"] = "outbound"
+        metadata["phone_number"] = phone
+        metadata["sip_trunk_id"] = settings["sip_trunk_id"]
 
     lk = api.LiveKitAPI(
         url=settings["url"],
@@ -76,12 +112,23 @@ async def dispatch_outbound_call(
         api_secret=settings["api_secret"],
     )
     try:
+        settings["sip_trunk_id"] = await resolve_outbound_trunk_id(
+            lk.sip,
+            settings["sip_trunk_id"],
+        )
+        metadata["sip_trunk_id"] = settings["sip_trunk_id"]
         dispatch = await lk.agent_dispatch.create_dispatch(
             api.CreateAgentDispatchRequest(
                 agent_name=agent_name,
                 room=room_name,
                 metadata=json.dumps(metadata),
             )
+        )
+        logger.info(
+            "[OUTBOUND] Dispatch created id=%s phone=%s room=%s",
+            dispatch.id,
+            phone,
+            room_name,
         )
         return {
             "status": "ok",
@@ -90,5 +137,14 @@ async def dispatch_outbound_call(
             "phone": phone,
             "sip_trunk_id": settings["sip_trunk_id"],
         }
+    except Exception:
+        logger.exception(
+            "[OUTBOUND] Dispatch failed phone=%s room=%s agent=%s trunk=%s",
+            phone,
+            room_name,
+            agent_name,
+            settings["sip_trunk_id"],
+        )
+        raise
     finally:
         await lk.aclose()

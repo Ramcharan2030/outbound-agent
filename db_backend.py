@@ -514,22 +514,56 @@ def cancel_appointment(appointment_id: str | int, reason: str = "") -> dict[str,
 
 
 def fetch_stats() -> dict[str, int]:
-    empty = {"total_calls": 0, "total_bookings": 0, "avg_duration": 0, "booking_rate": 0}
+    empty = {
+        "total_calls": 0,
+        "total_bookings": 0,
+        "bookings_today": 0,
+        "upcoming_today": 0,
+        "avg_duration": 0,
+        "booking_rate": 0,
+    }
     supabase = get_supabase()
     if not supabase:
         return empty
     try:
-        rows = supabase.table("call_logs").select("duration_seconds, summary, was_booked").execute().data or []
+        # Fetch call stats
+        rows = supabase.table("call_logs").select("duration_seconds, summary, was_booked, created_at").execute().data or []
         total = len(rows)
         bookings = sum(
             1 for row in rows if row.get("was_booked") or "confirmed" in (row.get("summary") or "").lower()
         )
+        
+        now = datetime.now(_IST)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = today_start + timedelta(days=1)
+        
+        bookings_today = 0
+        for row in rows:
+            created_at_str = row.get("created_at")
+            if created_at_str:
+                created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00")).astimezone(_IST)
+                if today_start <= created_at < today_end:
+                    if row.get("was_booked") or "confirmed" in (row.get("summary") or "").lower():
+                        bookings_today += 1
+
+        # Fetch upcoming appointments today
+        appts = supabase.table("appointments") \
+            .select("scheduled_start, status") \
+            .eq("status", "scheduled") \
+            .gte("scheduled_start", now.isoformat()) \
+            .lt("scheduled_start", today_end.isoformat()) \
+            .execute().data or []
+        upcoming_today = len(appts)
+
         durations = [row["duration_seconds"] for row in rows if row.get("duration_seconds")]
         avg_duration = round(sum(durations) / len(durations)) if durations else 0
         booking_rate = round((bookings / total) * 100) if total else 0
+        
         return {
             "total_calls": total,
             "total_bookings": bookings,
+            "bookings_today": bookings_today,
+            "upcoming_today": upcoming_today,
             "avg_duration": avg_duration,
             "booking_rate": booking_rate,
         }

@@ -38,14 +38,29 @@ def _format_slot_label(dt: datetime) -> str:
     return dt.strftime("%I:%M %p").lstrip("0")
 
 
-def _business_window(day: date) -> tuple[datetime, datetime] | tuple[None, None]:
+def _business_window(day: date, config: dict | None = None) -> tuple[datetime, datetime] | tuple[None, None]:
+    if config is None:
+        from backend_config import read_config
+        config = read_config()
+
     weekday = day.weekday()
     if weekday == 6:
-        return None, None
+        # Sunday check
+        if not config.get("business_sunday_enabled"):
+            return None, None
+        start_h = config.get("business_sunday_start", 10)
+        end_h = config.get("business_sunday_end", 14)
+    elif weekday == 5:
+        # Saturday
+        start_h = config.get("business_saturday_start", 10)
+        end_h = config.get("business_saturday_end", 17)
+    else:
+        # Weekday
+        start_h = config.get("business_weekday_start", 10)
+        end_h = config.get("business_weekday_end", 19)
 
-    close_hour = 17 if weekday == 5 else 19
-    start_dt = IST.localize(datetime.combine(day, time(hour=10, minute=0)))
-    end_dt = IST.localize(datetime.combine(day, time(hour=close_hour, minute=0)))
+    start_dt = IST.localize(datetime.combine(day, time(hour=start_h, minute=0)))
+    end_dt = IST.localize(datetime.combine(day, time(hour=end_h, minute=0)))
     return start_dt, end_dt
 
 
@@ -66,14 +81,14 @@ def validate_appointment_window(start_dt: datetime, end_dt: datetime) -> None:
 
     open_dt, close_dt = _business_window(start_dt.date())
     if not open_dt or not close_dt:
-        raise CalendarValidationError("The calendar is closed on Sundays.")
+        raise CalendarValidationError("The business is closed on the selected date.")
     if start_dt < open_dt or end_dt > close_dt:
         raise CalendarValidationError(
             f"Appointments must be within business hours ({_format_slot_label(open_dt)} to {_format_slot_label(close_dt)} IST)."
         )
 
 
-async def get_available_slots(date_str: str) -> list:
+async def get_available_slots(date_str: str, config: dict | None = None) -> list:
     """
     Fetch open slots for a given date from the internal appointments calendar.
     date_str: "YYYY-MM-DD"
@@ -84,7 +99,7 @@ async def get_available_slots(date_str: str) -> list:
         logger.error(f"[CAL] Invalid availability date: {date_str}")
         return []
 
-    open_dt, close_dt = _business_window(target_date)
+    open_dt, close_dt = _business_window(target_date, config=config)
     if not open_dt or not close_dt:
         logger.info(f"[CAL] Closed day for {date_str}")
         return []

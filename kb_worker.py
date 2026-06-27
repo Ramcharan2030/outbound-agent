@@ -28,7 +28,11 @@ import kb
 from backend_config import read_config
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(asctime)s.%(msecs)03d %(levelname)s %(name)s [pid=%(process)d] %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -50,8 +54,8 @@ async def main() -> None:
             processed = kb.process_pending_jobs(config, limit=5)
             if processed:
                 logger.info(f"[KB] Processed {len(processed)} KB jobs")
-        except Exception as exc:
-            logger.error(f"[KB] KB job processing failed: {exc}")
+        except Exception:
+            logger.exception("[KB] KB job processing failed")
         await asyncio.sleep(poll_seconds)
 
 

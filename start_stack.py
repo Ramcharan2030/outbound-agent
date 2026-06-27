@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 
@@ -14,6 +15,7 @@ DEFAULT_API_HOST = "0.0.0.0"
 DEFAULT_API_PORT = 8000
 DEFAULT_AGENT_HOST = "0.0.0.0"
 DEFAULT_AGENT_PORT = 8081
+LOG_LOCK = threading.Lock()
 
 
 def _bootstrap_venv() -> None:
@@ -40,6 +42,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-kb-worker", action="store_true", help="Skip the knowledge-base ingestion worker.")
     parser.add_argument("--api-port", type=int, default=None, help="Preferred backend API port. Falls forward to the next free port if busy.")
     parser.add_argument("--agent-port", type=int, default=None, help="Preferred LiveKit worker health port. Falls forward to the next free port if busy.")
+    parser.add_argument(
+        "--log-level",
+        choices=("debug", "info", "warning", "error"),
+        default=str(os.environ.get("LOG_LEVEL", "info")).strip().lower(),
+        help="Console log detail for all services (default: LOG_LEVEL or info).",
+    )
     return parser.parse_args()
 
 
@@ -55,7 +63,8 @@ def _parse_port(raw_value: str | None, default: int) -> int:
 
 def _is_port_available(host: str, port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if os.name == "nt":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         try:
             sock.bind((host, port))
         except OSError:
@@ -93,7 +102,18 @@ def build_services(
         services.append(
             {
                 "name": "api",
-                "cmd": [python_cmd, "-m", "uvicorn", "backend_api:app"],
+                "cmd": [
+                    python_cmd,
+                    "-m",
+                    "uvicorn",
+                    "backend_api:app",
+                    "--host",
+                    api_host,
+                    "--port",
+                    str(api_port),
+                    "--log-level",
+                    args.log_level,
+                ],
                 "cwd": str(ROOT),
                 "env": {
                     "HOST": api_host,
@@ -124,13 +144,19 @@ def build_services(
     return services
 
 
+def log_console(service: str, message: str) -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
+    with LOG_LOCK:
+        print(f"{timestamp} [{service}] {message}", flush=True)
+
+
 def stream_output(name: str, process: subprocess.Popen[str]) -> None:
     if not process.stdout:
         return
     for line in process.stdout:
         text = line.rstrip()
         if text:
-            print(f"[{name}] {text}", flush=True)
+            log_console(name, text)
 
 
 def stop_process(name: str, process: subprocess.Popen[str]) -> None:
@@ -150,17 +176,20 @@ def stop_process(name: str, process: subprocess.Popen[str]) -> None:
             except subprocess.TimeoutExpired:
                 process.kill()
     except Exception as exc:
-        print(f"[stack] Failed to stop {name}: {exc}", flush=True)
+        log_console("stack", f"ERROR: Failed to stop {name}: {type(exc).__name__}: {exc}")
 
 
-def start_services(services: list[dict]) -> list[tuple[str, subprocess.Popen[str]]]:
-    procs: list[tuple[str, subprocess.Popen[str]]] = []
+def start_services(services: list[dict], log_level: str) -> list[tuple[str, subprocess.Popen[str], float]]:
+    procs: list[tuple[str, subprocess.Popen[str], float]] = []
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     for service in services:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONUTF8"] = "1"
+        env["PYTHONFAULTHANDLER"] = "1"
+        env["LOG_LEVEL"] = log_level.upper()
         env.update(service.get("env", {}))
+        log_console("stack", f"Starting {service['name']}: {subprocess.list2cmdline(service['cmd'])}")
         process = subprocess.Popen(
             service["cmd"],
             cwd=service["cwd"],
@@ -173,10 +202,11 @@ def start_services(services: list[dict]) -> list[tuple[str, subprocess.Popen[str
             bufsize=1,
             creationflags=creationflags,
         )
-        procs.append((service["name"], process))
+        started_at = time.monotonic()
+        procs.append((service["name"], process, started_at))
         thread = threading.Thread(target=stream_output, args=(service["name"], process), daemon=True)
         thread.start()
-        print(f"[stack] Started {service['name']} (pid {process.pid})", flush=True)
+        log_console("stack", f"Started {service['name']} (pid {process.pid})")
         time.sleep(0.5)
     return procs
 
@@ -191,9 +221,9 @@ def main() -> int:
     agent_port = _find_available_port(agent_host, preferred_agent_port) if not args.no_agent else preferred_agent_port
 
     if not args.no_api and api_port != preferred_api_port:
-        print(f"[stack] API port {preferred_api_port} is busy. Using {api_port} instead.", flush=True)
+        log_console("stack", f"WARNING: API port {preferred_api_port} is busy. Using {api_port} instead.")
     if not args.no_agent and agent_port != preferred_agent_port:
-        print(f"[stack] Agent port {preferred_agent_port} is busy. Using {agent_port} instead.", flush=True)
+        log_console("stack", f"WARNING: Agent port {preferred_agent_port} is busy. Using {agent_port} instead.")
 
     services = build_services(
         args,
@@ -203,28 +233,35 @@ def main() -> int:
         agent_port=agent_port,
     )
     if not services:
-        print("[stack] Nothing to start.", flush=True)
+        log_console("stack", "Nothing to start.")
         return 0
 
-    procs = start_services(services)
-    print("[stack] Local stack is starting. Press Ctrl+C once to stop everything.", flush=True)
+    log_console("stack", f"Log level: {args.log_level.upper()}")
+    procs = start_services(services, args.log_level)
+    log_console("stack", "Local stack is starting. Press Ctrl+C once to stop everything.")
     if not args.no_api:
-        print(f"[stack] Backend API: http://127.0.0.1:{api_port}", flush=True)
+        log_console("stack", f"Backend API: http://127.0.0.1:{api_port}")
     if not args.no_agent:
-        print(f"[stack] Agent health: http://127.0.0.1:{agent_port}", flush=True)
+        log_console("stack", f"Agent health: http://127.0.0.1:{agent_port}")
     try:
         while True:
-            for name, process in procs:
+            for name, process, started_at in procs:
                 code = process.poll()
                 if code is not None:
-                    print(f"[stack] {name} exited with code {code}. Shutting down the rest of the stack.", flush=True)
+                    uptime = time.monotonic() - started_at
+                    level = "ERROR" if code else "INFO"
+                    log_console(
+                        "stack",
+                        f"{level}: {name} exited with code {code} after {uptime:.1f}s. "
+                        "Shutting down the rest of the stack.",
+                    )
                     return code
             time.sleep(1)
     except KeyboardInterrupt:
-        print("[stack] Stopping services ...", flush=True)
+        log_console("stack", "Stopping services ...")
         return 0
     finally:
-        for name, process in reversed(procs):
+        for name, process, _started_at in reversed(procs):
             stop_process(name, process)
 
 
