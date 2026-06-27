@@ -506,8 +506,17 @@ async def api_kb_create_source(request: Request):
     try:
         data = await request.json()
         source = kb.create_source(data, queue_sync=True, config=config)
-        await asyncio.to_thread(kb.process_pending_jobs, config, limit=1)
-        return {"status": "ok", "source": kb.get_source(source["id"], config=config)}
+        processed = []
+        try:
+            processed = await asyncio.to_thread(kb.process_pending_jobs, config, limit=3)
+        except Exception as sync_exc:
+            logger.exception("KB source was created, but immediate sync failed: %s", sync_exc)
+            return {
+                "status": "ok",
+                "source": kb.get_source(source["id"], config=config),
+                "sync_warning": str(sync_exc),
+            }
+        return {"status": "ok", "source": kb.get_source(source["id"], config=config), "jobs": processed}
     except Exception as exc:
         issue = kb.kb_runtime_issue_payload(exc, config=config)
         if issue.get("status") in {"setup_required", "not_configured"}:
@@ -569,8 +578,8 @@ async def api_kb_sync_source(source_id: str):
             payload={},
             config=config,
         )
-        await asyncio.to_thread(kb.process_pending_jobs, config, limit=3)
-        return {"status": "ok", "job": job}
+        processed = await asyncio.to_thread(kb.process_pending_jobs, config, limit=3)
+        return {"status": "ok", "job": job, "jobs": processed}
     except Exception as exc:
         issue = kb.kb_runtime_issue_payload(exc, config=config)
         if issue.get("status") in {"setup_required", "not_configured"}:
@@ -692,27 +701,38 @@ async def api_call_bulk(request: Request):
         numbers = [str(item).strip() for item in raw_numbers if str(item).strip()]
     else:
         numbers = [item.strip() for item in str(raw_numbers).splitlines() if item.strip()]
-    results = []
     config = _load_runtime_config()
-    for phone in numbers:
-        try:
-            result = await dispatch_outbound_call(phone, config=config)
-            results.append(
-                {
-                    "phone": phone,
-                    "status": "ok",
-                    "dispatch_id": result["dispatch_id"],
-                    "room": result["room"],
-                }
-            )
-            logger.info(f"Bulk outbound dispatched to {phone}: {result['dispatch_id']}")
-        except ValueError as exc:
-            logger.warning(f"Bulk call dispatch validation error for {phone}: {exc}")
-            results.append({"phone": phone, "status": "error", "message": str(exc)})
-        except Exception as exc:
-            logger.exception(f"Bulk call dispatch error for {phone}: {exc}")
-            results.append({"phone": phone, "status": "error", "message": "Unable to dispatch this call right now."})
-    return {"results": results, "total": len(results)}
+    if not numbers:
+        return JSONResponse({"status": "error", "message": "At least one phone number is required."}, status_code=400)
+
+    concurrency = max(1, min(10, parse_int(data.get("concurrency"), 5)))
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def dispatch_one(phone: str) -> dict:
+        async with semaphore:
+            return await _dispatch_bulk_phone(phone, config)
+
+    results = await asyncio.gather(*(dispatch_one(phone) for phone in numbers))
+    ok_count = sum(1 for item in results if item.get("status") == "ok")
+    return {"results": results, "total": len(results), "ok": ok_count, "failed": len(results) - ok_count}
+
+
+async def _dispatch_bulk_phone(phone: str, config: dict) -> dict:
+    try:
+        result = await dispatch_outbound_call(phone, config=config)
+        logger.info(f"Bulk outbound dispatched to {phone}: {result['dispatch_id']}")
+        return {
+            "phone": phone,
+            "status": "ok",
+            "dispatch_id": result["dispatch_id"],
+            "room": result["room"],
+        }
+    except ValueError as exc:
+        logger.warning(f"Bulk call dispatch validation error for {phone}: {exc}")
+        return {"phone": phone, "status": "error", "message": str(exc)}
+    except Exception as exc:
+        logger.exception(f"Bulk call dispatch error for {phone}: {exc}")
+        return {"phone": phone, "status": "error", "message": "Unable to dispatch this call right now."}
 
 
 @app.get("/")

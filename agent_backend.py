@@ -879,6 +879,65 @@ def parse_outbound_job_metadata(raw_metadata: str | None) -> dict:
     return parsed
 
 
+def apply_runtime_metadata_config(config: dict, job_meta: dict) -> dict:
+    runtime_config = job_meta.get("runtime_config")
+    if not isinstance(runtime_config, dict):
+        return config
+
+    allowed_keys = {
+        "llm_provider",
+        "openrouter_model",
+        "first_line",
+        "agent_instructions",
+        "gemini_live_model",
+        "gemini_live_voice",
+        "gemini_live_temperature",
+        "gemini_live_language",
+        "gemini_live_preflight_enabled",
+        "gemini_live_preflight_timeout",
+        "gemini_live_connect_timeout",
+        "gemini_live_connect_retries",
+        "gemini_tts_model",
+        "lang_preset",
+        "max_turns",
+        "user_away_timeout",
+        "session_close_transcript_timeout",
+        "kb_enabled",
+        "kb_backend",
+        "kb_data_dir",
+        "kb_top_k",
+        "kb_similarity_threshold",
+        "kb_context_char_budget",
+        "kb_live_timeout_ms",
+        "kb_live_context_char_budget",
+        "kb_cache_ttl_seconds",
+        "kb_chunk_size",
+        "kb_chunk_overlap",
+        "kb_worker_poll_seconds",
+        "kb_embedding_provider",
+        "kb_embedding_model",
+        "kb_embedding_fallback_provider",
+        "kb_embedding_fallback_model",
+        "kb_index_kind",
+        "kb_rerank_enabled",
+        "business_weekday_start",
+        "business_weekday_end",
+        "business_saturday_start",
+        "business_saturday_end",
+        "business_sunday_enabled",
+        "business_sunday_start",
+        "business_sunday_end",
+    }
+    applied = []
+    for key in allowed_keys:
+        if key in runtime_config and runtime_config[key] not in (None, ""):
+            config[key] = runtime_config[key]
+            applied.append(key)
+    if applied:
+        logger.info("[CONFIG] Applied outbound runtime config snapshot: %s", ", ".join(sorted(applied)))
+    return config
+
+
 async def entrypoint(ctx: JobContext) -> None:
     job_meta = parse_outbound_job_metadata(ctx.job.metadata)
     if not job_meta:
@@ -914,6 +973,12 @@ async def entrypoint(ctx: JobContext) -> None:
         return
 
     live_config = get_live_config(caller_phone if caller_phone != "unknown" else None)
+    live_config = apply_runtime_metadata_config(live_config, job_meta)
+    logger.info(
+        "[CONFIG] Active call config first_line_chars=%s agent_instructions_chars=%s",
+        len(str(live_config.get("first_line") or "")),
+        len(str(live_config.get("agent_instructions") or "")),
+    )
     if not await preflight_gemini_live_connection(live_config):
         logger.error("[VOICE] Gemini Live preflight failed and no fallback runtime is available")
         ctx.shutdown()

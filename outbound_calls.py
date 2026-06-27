@@ -11,6 +11,65 @@ load_dotenv(".env")
 DEFAULT_AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "vobiz-demo-agent").strip() or "vobiz-demo-agent"
 logger = logging.getLogger("outbound-calls")
 
+RUNTIME_METADATA_CONFIG_KEYS = {
+    "llm_provider",
+    "openrouter_model",
+    "first_line",
+    "agent_instructions",
+    "gemini_live_model",
+    "gemini_live_voice",
+    "gemini_live_temperature",
+    "gemini_live_language",
+    "gemini_live_preflight_enabled",
+    "gemini_live_preflight_timeout",
+    "gemini_live_connect_timeout",
+    "gemini_live_connect_retries",
+    "gemini_tts_model",
+    "lang_preset",
+    "max_turns",
+    "user_away_timeout",
+    "session_close_transcript_timeout",
+    "kb_enabled",
+    "kb_backend",
+    "kb_data_dir",
+    "kb_top_k",
+    "kb_similarity_threshold",
+    "kb_context_char_budget",
+    "kb_live_timeout_ms",
+    "kb_live_context_char_budget",
+    "kb_cache_ttl_seconds",
+    "kb_chunk_size",
+    "kb_chunk_overlap",
+    "kb_worker_poll_seconds",
+    "kb_embedding_provider",
+    "kb_embedding_model",
+    "kb_embedding_fallback_provider",
+    "kb_embedding_fallback_model",
+    "kb_index_kind",
+    "kb_rerank_enabled",
+    "business_weekday_start",
+    "business_weekday_end",
+    "business_saturday_start",
+    "business_saturday_end",
+    "business_sunday_enabled",
+    "business_sunday_start",
+    "business_sunday_end",
+}
+
+
+def build_runtime_metadata_config(config: dict | None) -> dict:
+    snapshot = {}
+    for key in RUNTIME_METADATA_CONFIG_KEYS:
+        value = (config or {}).get(key)
+        if value in (None, ""):
+            continue
+        if key == "agent_instructions":
+            value = str(value)[:8000]
+        elif key == "first_line":
+            value = str(value)[:1200]
+        snapshot[key] = value
+    return snapshot
+
 
 def read_config() -> dict:
     return dict(read_backend_config())
@@ -98,6 +157,9 @@ async def dispatch_outbound_call(
         "phone_number": phone,
         "sip_trunk_id": settings["sip_trunk_id"],
     }
+    runtime_config = build_runtime_metadata_config(config)
+    if runtime_config:
+        metadata["runtime_config"] = runtime_config
     if caller_name:
         metadata["caller_name"] = caller_name
     if extra_metadata:
