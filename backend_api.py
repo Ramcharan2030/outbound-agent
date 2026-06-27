@@ -29,6 +29,7 @@ from backend_events import (
     handle_booking_confirmed,
 )
 from outbound_calls import dispatch_outbound_call
+from runtime_env import get_config_read_paths, get_primary_config_path
 
 load_dotenv()
 
@@ -190,6 +191,24 @@ def _timestamp_rank(value: str | None) -> float:
 @app.get("/api/config")
 async def api_get_config():
     return read_config()
+
+
+@app.get("/api/config/debug")
+async def api_get_config_debug():
+    config = read_config()
+    primary_path = get_primary_config_path()
+    read_paths = get_config_read_paths()
+    return {
+        "status": "ok",
+        "primary_config_file": str(primary_path),
+        "primary_config_exists": primary_path.exists(),
+        "read_paths": [{"path": str(path), "exists": path.exists()} for path in read_paths],
+        "first_line": config.get("first_line") or "",
+        "agent_instructions_chars": len(str(config.get("agent_instructions") or "")),
+        "agent_instructions_preview": str(config.get("agent_instructions") or "")[:160],
+        "env_first_line_set": bool(os.getenv("FIRST_LINE")),
+        "env_agent_instructions_set": bool(os.getenv("AGENT_INSTRUCTIONS")),
+    }
 
 
 @app.post("/api/config")

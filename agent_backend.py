@@ -790,9 +790,10 @@ class OutboundAssistant(Agent):
         base_instructions = str(self._live_config.get("agent_instructions") or "").strip()
         if not base_instructions:
             base_instructions = (
-                "You are Aryan from SPX AI. Qualify the caller, answer with confirmed information, and help "
+                "You are the SPXAgent voice assistant. Qualify the caller, answer with confirmed information, and help "
                 "them book an appointment or transfer to a human when needed."
             )
+        opening_identity = get_opening_greeting(self._live_config, self._first_line)
 
         trusted_phone = bool(self._caller_profile.get("trusted_phone")) and bool(
             db.normalize_phone_number(self._caller_profile.get("phone_number") or "")
@@ -823,7 +824,11 @@ class OutboundAssistant(Agent):
             + "Do not promise WhatsApp messages, reminders, demo links, or follow-up automation.\n"
             + "Use the knowledge-base tool before guessing.\n"
             + "When facts are not confirmed, say so plainly.\n"
-            + "Default next steps are an appointment, a callback, or a human transfer."
+            + "Default next steps are an appointment, a callback, or a human transfer.\n\n"
+            + "[IDENTITY LOCK]\n"
+            + f"The configured opening line is: {json.dumps(opening_identity, ensure_ascii=False)}\n"
+            + "Use the assistant name and company identity from that configured opening line. "
+            + "Never introduce yourself using a different assistant name."
             + get_ist_time_context()
             + get_language_instruction(str(self._live_config.get('lang_preset') or 'multilingual'))
         )
